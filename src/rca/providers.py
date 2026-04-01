@@ -2,22 +2,24 @@ from __future__ import annotations
 
 import html
 import json
-import os
+import logging
 import re
 import sqlite3
 import textwrap
-import urllib.parse
-import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from mcp_client.client import get_streamable_http_mcp_client
 from rca.dummy_data import DUMMY_GITHUB_CONTEXT, SEED_LOGS
 from rca.models import LogRecord
 
 HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
 WHITESPACE_PATTERN = re.compile(r"\s+")
+STRUCTURED_LIST_KEYS = ("results", "items", "documents", "data", "hits", "sources")
+logger = logging.getLogger(__name__)
 
 
 def _repo_root() -> Path:
@@ -30,24 +32,9 @@ def _sanitize_text(raw: str) -> str:
     return WHITESPACE_PATTERN.sub(" ", unescaped).strip()
 
 
-def _http_get_json(url: str, timeout: float = 8.0) -> dict[str, Any]:
-    request = urllib.request.Request(url=url, method="GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = response.read().decode("utf-8")
-    return json.loads(payload)
-
-
-def _http_post_json(url: str, payload: dict[str, Any], timeout: float = 12.0) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url=url,
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
-    return json.loads(raw)
+def _shorten(text: str, width: int = 420) -> str:
+    cleaned = _sanitize_text(text)
+    return textwrap.shorten(cleaned, width=width, placeholder="...") if cleaned else ""
 
 
 class SQLiteLogProvider:
@@ -150,78 +137,425 @@ class DummyGitHubContextProvider:
 
 
 class WebSearchProvider:
-    DEFAULT_TAVILY_API_KEY = "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"
-
     def __init__(self) -> None:
-        self.api_key = os.getenv("TAVILY_API_KEY", self.DEFAULT_TAVILY_API_KEY).strip()
-        self.search_url = os.getenv("TAVILY_SEARCH_URL", "https://api.tavily.com/search").strip()
+        self._client = get_streamable_http_mcp_client()
 
-    def search_probable_fixes(self, query: str, limit: int = 3) -> list[dict[str, Any]]:
-        if not self.api_key:
-            return [
-                {
-                    "source": "Tavily",
-                    "title": "Tavily API key missing",
-                    "url": "",
-                    "summary": "Set TAVILY_API_KEY to enable web search.",
-                    "probable_fix": "",
-                }
-            ]
-
-        payload = {
-            "api_key": self.api_key,
-            "query": query,
-            "search_depth": "advanced",
-            "max_results": limit,
-            "include_answer": True,
-            "include_raw_content": False,
-        }
+    async def search_probable_fixes(self, query: str, limit: int = 3) -> list[dict[str, Any]]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("Tavily Gateway search query was empty.")
+        logger.info(
+            "Research Worker: starting Tavily Gateway search (query_len=%s, limit=%s).",
+            len(normalized_query),
+            limit,
+        )
 
         try:
-            response = _http_post_json(self.search_url, payload=payload, timeout=12.0)
-        except Exception as exc:  # pragma: no cover - network condition dependent
+            tools = await self._client.get_tools()
+        except Exception as exc:
+            logger.exception("Research Worker: Gateway tools/list failed.")
+            raise RuntimeError(
+                f"Unable to load tools from AgentCore Gateway via tools/list: {exc}"
+            ) from exc
+
+        logger.info("Research Worker: Gateway tools/list returned %s tool(s).", len(tools))
+        tavily_tools = self._discover_tavily_tools(tools)
+        if not tavily_tools:
+            available = [str(getattr(tool, "name", "")) for tool in tools]
+            logger.error(
+                "Research Worker: no Tavily-prefixed tools found. Available tools=%s",
+                available,
+            )
+            raise RuntimeError(
+                "No Tavily-prefixed tool was exposed by AgentCore Gateway. "
+                f"Available tools: {available}"
+            )
+
+        logger.info(
+            "Research Worker: Tavily candidate tools in ranked order=%s",
+            [str(getattr(tool, "name", "")) for tool in tavily_tools],
+        )
+        failure_messages: list[str] = []
+        for tool in tavily_tools:
+            tool_name = str(getattr(tool, "name", "unknown"))
+            arg_attempts = self._build_argument_attempts(
+                tool=tool,
+                query=normalized_query,
+                limit=limit,
+            )
+            logger.info(
+                "Research Worker: trying tool '%s' with %s argument attempt(s).",
+                tool_name,
+                len(arg_attempts),
+            )
+            raw_result, used_args, error = await self._invoke_with_attempts(tool, arg_attempts)
+            if raw_result is None:
+                logger.warning(
+                    "Research Worker: tool '%s' invocation failed across all attempts.",
+                    tool_name,
+                )
+                failure_messages.append(
+                    f"{tool_name}: invoke failed ({error}) with attempts {arg_attempts}"
+                )
+                continue
+
+            findings = self._normalize_findings(raw_result, tool_name=tool_name)
+            if not findings:
+                logger.warning(
+                    "Research Worker: tool '%s' returned no parsable findings.",
+                    tool_name,
+                )
+                failure_messages.append(
+                    f"{tool_name}: returned no parsable findings (args {used_args})"
+                )
+                continue
+
+            logger.info(
+                "Research Worker: tool '%s' succeeded with %s finding(s).",
+                tool_name,
+                len(findings),
+            )
+            return findings[: max(1, limit)]
+
+        logger.error(
+            "Research Worker: all Tavily Gateway tools failed. Failures=%s",
+            failure_messages,
+        )
+        raise RuntimeError(
+            "All Tavily Gateway tools failed for query-based research. "
+            f"Failures: {failure_messages}"
+        )
+
+    def _discover_tavily_tools(self, tools: Sequence[Any]) -> list[Any]:
+        def score(tool: Any) -> tuple[int, int, int, int, str]:
+            name = str(getattr(tool, "name", "")).strip()
+            lowered = name.lower()
+            schema = self._extract_schema(tool)
+            props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+            required = schema.get("required", []) if isinstance(schema, dict) else []
+            required_set = {str(item).lower() for item in required} if isinstance(required, list) else set()
+            prop_keys = {str(key).lower() for key in props.keys()} if isinstance(props, dict) else set()
+
+            has_query_param = self._pick_key(
+                props if isinstance(props, dict) else {},
+                candidates=["query", "q", "search_query", "keywords", "input", "text", "question"],
+            ) is not None
+            has_urls_required = "urls" in required_set
+            has_urls_param = "urls" in prop_keys
+
+            is_search_named = 1 if "search" in lowered else 0
+            # Prefer query-compatible and avoid extract-style urls-only tools.
+            query_penalty = 0 if has_query_param else 1
+            urls_penalty = 1 if (has_urls_required and not has_query_param) else 0
+            starts_penalty = 0 if lowered.startswith("tavily___") else 1
+            # Lower tuple sorts first.
+            return (
+                query_penalty,
+                urls_penalty,
+                -is_search_named,
+                starts_penalty,
+                lowered,
+            )
+
+        matches = []
+        for tool in tools:
+            name = str(getattr(tool, "name", "")).lower()
+            if "tavily" in name:
+                matches.append(tool)
+        return sorted(matches, key=score)
+
+    async def _invoke_with_attempts(
+        self, tool: Any, attempts: list[dict[str, Any]]
+    ) -> tuple[Any | None, dict[str, Any], Exception | None]:
+        last_error: Exception | None = None
+        tool_name = str(getattr(tool, "name", "unknown"))
+        for index, args in enumerate(attempts, start=1):
+            logger.debug(
+                "Research Worker: invoking '%s' attempt %s/%s with args keys=%s",
+                tool_name,
+                index,
+                len(attempts),
+                sorted(list(args.keys())),
+            )
+            try:
+                return await tool.ainvoke(args), args, None
+            except Exception as exc:
+                last_error = exc
+                logger.debug(
+                    "Research Worker: '%s' attempt %s failed: %s",
+                    tool_name,
+                    index,
+                    exc,
+                )
+        return None, {}, last_error
+
+    def _build_argument_attempts(
+        self, tool: Any, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        schema = self._extract_schema(tool)
+        properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        required = schema.get("required", []) if isinstance(schema, dict) else []
+        required_set = {str(item) for item in required} if isinstance(required, list) else set()
+
+        schema_args: dict[str, Any] = {}
+        query_key = self._pick_key(
+            properties,
+            candidates=["query", "q", "search_query", "keywords", "input", "text", "question"],
+        )
+        if query_key:
+            schema_args[query_key] = query
+
+        limit_key = self._pick_key(
+            properties,
+            candidates=[
+                "max_results",
+                "limit",
+                "count",
+                "top_k",
+                "k",
+                "num_results",
+                "max_items",
+            ],
+        )
+        if limit_key:
+            schema_args[limit_key] = max(1, limit)
+
+        for candidate_key in ["search_depth", "include_answer", "include_raw_content"]:
+            if candidate_key in properties and candidate_key not in schema_args:
+                schema_args[candidate_key] = self._default_property_value(
+                    prop_schema=properties.get(candidate_key, {}),
+                    query=query,
+                    limit=limit,
+                )
+
+        for key in required_set:
+            if key in schema_args:
+                continue
+            schema_args[key] = self._default_property_value(
+                prop_schema=properties.get(key, {}),
+                query=query,
+                limit=limit,
+            )
+
+        attempts: list[dict[str, Any]] = []
+        if schema_args:
+            attempts.append({k: v for k, v in schema_args.items() if v is not None})
+
+        attempts.extend(
+            [
+                {"query": query, "max_results": max(1, limit)},
+                {"query": query},
+                {"q": query, "max_results": max(1, limit)},
+                {"q": query},
+                {"search_query": query, "max_results": max(1, limit)},
+                {"search_query": query},
+            ]
+        )
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for args in attempts:
+            try:
+                signature = json.dumps(args, sort_keys=True, default=str)
+            except Exception:
+                signature = str(args)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(args)
+        return deduped
+
+    def _extract_schema(self, tool: Any) -> dict[str, Any]:
+        args_schema = getattr(tool, "args_schema", None)
+        if args_schema is not None and hasattr(args_schema, "model_json_schema"):
+            try:
+                schema = args_schema.model_json_schema()
+                if isinstance(schema, dict):
+                    return schema
+            except Exception:
+                pass
+
+        raw_args = getattr(tool, "args", None)
+        if isinstance(raw_args, dict):
+            return {"type": "object", "properties": raw_args}
+        return {"type": "object", "properties": {}}
+
+    def _pick_key(self, properties: dict[str, Any], candidates: list[str]) -> str | None:
+        if not properties:
+            return None
+
+        exact_index = {key.lower(): key for key in properties.keys()}
+        for candidate in candidates:
+            if candidate in exact_index:
+                return exact_index[candidate]
+
+        for key in properties.keys():
+            lowered = key.lower()
+            if any(candidate in lowered for candidate in candidates):
+                return key
+        return None
+
+    def _default_property_value(
+        self, prop_schema: dict[str, Any], query: str, limit: int
+    ) -> Any:
+        if not isinstance(prop_schema, dict):
+            return None
+
+        enum_values = prop_schema.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            lowered = {str(item).lower(): item for item in enum_values}
+            if "advanced" in lowered:
+                return lowered["advanced"]
+            if "basic" in lowered:
+                return lowered["basic"]
+            return enum_values[0]
+
+        prop_type = str(prop_schema.get("type", "")).lower()
+        if prop_type in {"integer", "number"}:
+            return max(1, limit)
+        if prop_type == "boolean":
+            return False
+        if prop_type == "array":
+            return [query]
+        if prop_type == "string" or not prop_type:
+            return query
+        return None
+
+    def _normalize_findings(self, raw_result: Any, tool_name: str) -> list[dict[str, Any]]:
+        content, artifact = self._split_tool_result(raw_result)
+        records = self._extract_structured_records(artifact)
+        findings: list[dict[str, Any]] = []
+
+        for record in records:
+            title = self._pick_text(
+                record,
+                keys=("title", "name", "headline", "topic"),
+                fallback="Tavily result",
+            )
+            url = self._pick_text(
+                record,
+                keys=("url", "link", "source_url", "source"),
+                fallback="",
+            )
+            summary = self._pick_text(
+                record,
+                keys=("summary", "snippet", "content", "text", "description"),
+                fallback="Relevant web finding returned by Tavily through Gateway.",
+            )
+            probable_fix = self._pick_text(
+                record,
+                keys=("probable_fix", "fix", "solution", "recommendation", "summary", "snippet"),
+                fallback=summary,
+            )
+            findings.append(
+                {
+                    "source": "Tavily (Gateway)",
+                    "title": _shorten(title, width=180),
+                    "url": url,
+                    "summary": _shorten(summary),
+                    "probable_fix": _shorten(probable_fix),
+                    "tool": tool_name,
+                }
+            )
+
+        if findings:
+            return findings
+
+        text_chunks = self._extract_text_blocks(content)
+        if not text_chunks:
+            text_chunks = self._extract_text_blocks(artifact)
+
+        if text_chunks:
+            combined = _shorten(" ".join(text_chunks))
             return [
                 {
-                    "source": "Tavily",
-                    "title": "Tavily search unavailable",
+                    "source": "Tavily (Gateway)",
+                    "title": f"{tool_name} response",
                     "url": "",
-                    "summary": f"Tavily lookup failed: {exc}",
-                    "probable_fix": "",
+                    "summary": combined,
+                    "probable_fix": combined,
+                    "tool": tool_name,
                 }
             ]
+        return []
 
-        answer = _sanitize_text(str(response.get("answer", "")))
-        findings: list[dict[str, Any]] = []
-        results = response.get("results", [])
-        for result in results[:limit]:
-            title = _sanitize_text(str(result.get("title", "")))
-            link = str(result.get("url", ""))
-            content = _sanitize_text(str(result.get("content", "")))
-            probable_fix = textwrap.shorten(content, width=320, placeholder="...") if content else ""
-            summary = probable_fix or answer or "Relevant Tavily result found; inspect source."
-            findings.append(
-                {
-                    "source": "Tavily",
-                    "title": title,
-                    "url": link,
-                    "summary": summary[:400],
-                    "probable_fix": probable_fix[:400],
-                }
-            )
+    def _split_tool_result(self, raw_result: Any) -> tuple[Any, dict[str, Any]]:
+        content = raw_result
+        artifact_structured: dict[str, Any] = {}
 
-        if not findings and answer:
-            findings.append(
-                {
-                    "source": "Tavily",
-                    "title": "Tavily direct answer",
-                    "url": "",
-                    "summary": answer[:400],
-                    "probable_fix": answer[:400],
-                }
-            )
+        if isinstance(raw_result, tuple) and len(raw_result) == 2:
+            content = raw_result[0]
+            artifact_candidate = raw_result[1]
+            if isinstance(artifact_candidate, dict):
+                structured = artifact_candidate.get("structured_content")
+                if isinstance(structured, dict):
+                    artifact_structured = structured
+        elif isinstance(raw_result, dict):
+            structured = raw_result.get("structured_content")
+            if isinstance(structured, dict):
+                artifact_structured = structured
+            elif isinstance(raw_result.get("artifact"), dict):
+                nested = raw_result["artifact"].get("structured_content")
+                if isinstance(nested, dict):
+                    artifact_structured = nested
 
-        return findings
+        return content, artifact_structured
 
+    def _extract_structured_records(self, payload: Any) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, dict):
+                for key in STRUCTURED_LIST_KEYS:
+                    maybe_list = node.get(key)
+                    if isinstance(maybe_list, list):
+                        for item in maybe_list:
+                            if isinstance(item, dict):
+                                records.append(item)
+                for value in node.values():
+                    visit(value)
+                return
+
+            if isinstance(node, list):
+                for item in node:
+                    visit(item)
+
+        visit(payload)
+        return records
+
+    def _extract_text_blocks(self, payload: Any) -> list[str]:
+        chunks: list[str] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, str):
+                cleaned = _sanitize_text(node)
+                if cleaned:
+                    chunks.append(cleaned)
+                return
+
+            if isinstance(node, dict):
+                node_type = str(node.get("type", "")).lower()
+                if node_type == "text" and isinstance(node.get("text"), str):
+                    cleaned = _sanitize_text(node["text"])
+                    if cleaned:
+                        chunks.append(cleaned)
+                for value in node.values():
+                    visit(value)
+                return
+
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    visit(item)
+
+        visit(payload)
+        return chunks
+
+    def _pick_text(self, record: dict[str, Any], keys: tuple[str, ...], fallback: str) -> str:
+        for key in keys:
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return fallback
 
 class AgentIntelligenceProvider:
     def __init__(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,26 @@ class RCAState(TypedDict, total=False):
     web_probable_solution: str
     agent_intelligence: dict[str, Any]
     report: dict[str, Any]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_ms(start: datetime, end: datetime) -> float:
+    return round((end - start).total_seconds() * 1000.0, 2)
+
+
+def _apply_update(state: RCAState, update: dict[str, Any] | None) -> None:
+    if update:
+        state.update(update)
+
+
+async def _run_step_function(step_fn, state: RCAState) -> dict[str, Any]:
+    result = step_fn(state)
+    if inspect.isawaitable(result):
+        result = await result
+    return result if isinstance(result, dict) else {}
 
 
 def _has_errors(state: RCAState) -> bool:
@@ -169,7 +190,7 @@ def fetch_github_context(state: RCAState) -> RCAState:
     return {"github_context": context}
 
 
-def do_web_search(state: RCAState) -> RCAState:
+async def do_web_search(state: RCAState) -> RCAState:
     if _has_errors(state):
         return {}
 
@@ -178,13 +199,32 @@ def do_web_search(state: RCAState) -> RCAState:
         f"{analysis['exception_type']} {analysis['key_error_message']} "
         f"{analysis['service_name']} {analysis['endpoint_or_job']} python"
     )
-    findings = WEB_PROVIDER.search_probable_fixes(query=query, limit=3)
-    web_fix_lines = [item.get("probable_fix", "").strip() for item in findings if item.get("probable_fix")]
-    web_probable_solution = (
-        " | ".join(web_fix_lines[:2])
-        if web_fix_lines
-        else "No actionable web fix could be extracted from live search results."
-    )
+    try:
+        findings = await WEB_PROVIDER.search_probable_fixes(query=query, limit=3)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "errors": [f"Tavily Gateway research failed: {exc}"],
+        }
+
+    web_fix_lines = []
+    for item in findings:
+        probable_fix = str(item.get("probable_fix", "")).strip()
+        summary = str(item.get("summary", "")).strip()
+        if probable_fix:
+            web_fix_lines.append(probable_fix)
+        elif summary:
+            web_fix_lines.append(summary)
+
+    if not web_fix_lines:
+        return {
+            "status": "failed",
+            "errors": [
+                "Tavily Gateway returned findings but no usable solution text for RCA synthesis."
+            ],
+        }
+
+    web_probable_solution = " | ".join(web_fix_lines[:2])
     return {"web_findings": findings, "web_probable_solution": web_probable_solution}
 
 
@@ -426,3 +466,245 @@ async def run_rca_workflow(log_id: str | None) -> dict[str, Any]:
     initial_state: RCAState = {"log_id": log_id or ""}
     result = await RCA_GRAPH.ainvoke(initial_state)
     return result["report"]
+
+
+async def run_rca_workflow_stream(log_id: str | None):
+    state: RCAState = {"log_id": log_id or ""}
+
+    # Step 1: Validating + DB fetch
+    step_key = "validate_fetch"
+    step_title = "Validating Log ID & Fetching Logs From Database"
+    started = datetime.now(timezone.utc)
+    yield {
+        "type": "step_started",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": _utc_now_iso(),
+    }
+    yield {
+        "type": "step_stream",
+        "step_key": step_key,
+        "text": "Checking log_id format and request payload.",
+        "timestamp": _utc_now_iso(),
+    }
+    _apply_update(state, await _run_step_function(validate_input, state))
+    if not _has_errors(state):
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": f"Fetching logs from database for {state.get('log_id', '')}.",
+            "timestamp": _utc_now_iso(),
+        }
+        _apply_update(state, await _run_step_function(fetch_logs_from_db, state))
+        if not _has_errors(state):
+            log_record = state.get("log_record", {})
+            log_lines = log_record.get("log_lines", []) if isinstance(log_record, dict) else []
+            stack_trace = log_record.get("stack_trace", []) if isinstance(log_record, dict) else []
+            yield {
+                "type": "step_stream",
+                "step_key": step_key,
+                "text": f"Fetched {len(log_lines)} log lines and {len(stack_trace)} stack trace lines.",
+                "timestamp": _utc_now_iso(),
+            }
+    ended = datetime.now(timezone.utc)
+    step1_failed = _has_errors(state)
+    yield {
+        "type": "step_failed" if step1_failed else "step_completed",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_ms": _duration_ms(started, ended),
+        "message": state.get("errors", [""])[0] if step1_failed else "Completed.",
+    }
+
+    # Step 2: Log analysis
+    step_key = "analyze_logs"
+    step_title = "Analyzing Logs and Detecting Error"
+    started = datetime.now(timezone.utc)
+    yield {
+        "type": "step_started",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": _utc_now_iso(),
+    }
+    if not _has_errors(state):
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": "Extracting key exception and classifying error category.",
+            "timestamp": _utc_now_iso(),
+        }
+        _apply_update(state, await _run_step_function(analyze_logs, state))
+        if not _has_errors(state):
+            analysis = state.get("analysis", {})
+            yield {
+                "type": "step_stream",
+                "step_key": step_key,
+                "text": (
+                    f"Detected category '{analysis.get('exception_category', 'unknown')}' with key error: "
+                    f"{analysis.get('key_error_message', '')}"
+                ),
+                "timestamp": _utc_now_iso(),
+            }
+    ended = datetime.now(timezone.utc)
+    step2_failed = _has_errors(state)
+    yield {
+        "type": "step_failed" if step2_failed else "step_completed",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_ms": _duration_ms(started, ended),
+        "message": state.get("errors", [""])[0] if step2_failed else "Completed.",
+    }
+
+    # Step 3: Source location
+    step_key = "locate_source"
+    step_title = "Locating Source File and Function"
+    started = datetime.now(timezone.utc)
+    yield {
+        "type": "step_started",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": _utc_now_iso(),
+    }
+    if not _has_errors(state):
+        location = state.get("source_location", {})
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": (
+                f"Mapped likely source to {location.get('file_path', 'unknown')}::"
+                f"{location.get('function_or_class', 'unknown')} (line {location.get('line_number', 'n/a')})."
+            ),
+            "timestamp": _utc_now_iso(),
+        }
+    ended = datetime.now(timezone.utc)
+    step3_failed = _has_errors(state)
+    yield {
+        "type": "step_failed" if step3_failed else "step_completed",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_ms": _duration_ms(started, ended),
+        "message": state.get("errors", [""])[0] if step3_failed else "Completed.",
+    }
+
+    # Step 4: GitHub + Tavily
+    step_key = "github_tavily"
+    step_title = "Fetching GitHub Context & Researching Fixes on Tavily"
+    started = datetime.now(timezone.utc)
+    yield {
+        "type": "step_started",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": _utc_now_iso(),
+    }
+    if not _has_errors(state):
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": "Fetching GitHub file context for the suspected source location.",
+            "timestamp": _utc_now_iso(),
+        }
+        _apply_update(state, await _run_step_function(fetch_github_context, state))
+        github_context = state.get("github_context", {})
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": f"GitHub context status: {github_context.get('status', 'unknown')}.",
+            "timestamp": _utc_now_iso(),
+        }
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": "Searching Tavily for external fix patterns and references.",
+            "timestamp": _utc_now_iso(),
+        }
+        _apply_update(state, await _run_step_function(do_web_search, state))
+        if not _has_errors(state):
+            web_findings = state.get("web_findings", [])
+            yield {
+                "type": "step_stream",
+                "step_key": step_key,
+                "text": (
+                    f"Tavily returned {len(web_findings) if isinstance(web_findings, list) else 0} findings."
+                ),
+                "timestamp": _utc_now_iso(),
+            }
+    ended = datetime.now(timezone.utc)
+    step4_failed = _has_errors(state)
+    yield {
+        "type": "step_failed" if step4_failed else "step_completed",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_ms": _duration_ms(started, ended),
+        "message": state.get("errors", [""])[0] if step4_failed else "Completed.",
+    }
+
+    # Step 5: Bedrock reasoning + RCA draft
+    step_key = "bedrock_draft"
+    step_title = "Bedrock Reasoning & Drafting Final RCA"
+    started = datetime.now(timezone.utc)
+    yield {
+        "type": "step_started",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": _utc_now_iso(),
+    }
+    if not _has_errors(state):
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": "Sending consolidated evidence to Bedrock for root-cause reasoning.",
+            "timestamp": _utc_now_iso(),
+        }
+        _apply_update(state, await _run_step_function(generate_agent_solution, state))
+        if not _has_errors(state):
+            agent = state.get("agent_intelligence", {})
+            yield {
+                "type": "step_stream",
+                "step_key": step_key,
+                "text": f"Bedrock generated RCA hypothesis with confidence {agent.get('confidence', 'n/a')}.",
+                "timestamp": _utc_now_iso(),
+            }
+        else:
+            yield {
+                "type": "step_stream",
+                "step_key": step_key,
+                "text": "Bedrock reasoning failed while generating agent intelligence output.",
+                "timestamp": _utc_now_iso(),
+            }
+    if not _has_errors(state):
+        yield {
+            "type": "step_stream",
+            "step_key": step_key,
+            "text": "Combining model reasoning and web evidence into final RCA report.",
+            "timestamp": _utc_now_iso(),
+        }
+    _apply_update(state, await _run_step_function(combine_solutions_and_report, state))
+    ended = datetime.now(timezone.utc)
+    step5_failed = _has_errors(state) or state.get("report", {}).get("status") == "failed"
+    yield {
+        "type": "step_failed" if step5_failed else "step_completed",
+        "step_key": step_key,
+        "step_title": step_title,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "duration_ms": _duration_ms(started, ended),
+        "message": (
+            state.get("errors", [""])[0]
+            if step5_failed
+            else "Completed."
+        ),
+    }
+
+    report = state.get("report", {})
+    yield {
+        "type": "report_generated",
+        "report": report,
+    }

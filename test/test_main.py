@@ -30,7 +30,7 @@ def test_invoke_with_valid_log_id_returns_success_report() -> None:
         new=AsyncMock(return_value=mocked_agent_output),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
-        return_value=mocked_tavily_findings,
+        new=AsyncMock(return_value=mocked_tavily_findings),
     ):
         result = asyncio.run(invoke({"log_id": "LOG-1002"}))
     report = result["report"]
@@ -82,7 +82,7 @@ def test_invoke_with_json_string_payload_parses_log_id() -> None:
         new=AsyncMock(return_value=mocked_agent_output),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
-        return_value=mocked_tavily_findings,
+        new=AsyncMock(return_value=mocked_tavily_findings),
     ):
         result = asyncio.run(invoke('{"log_id":"LOG-1001"}'))
     report = result["report"]
@@ -121,10 +121,52 @@ def test_invoke_with_nested_message_payload_parses_log_id() -> None:
         new=AsyncMock(return_value=mocked_agent_output),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
-        return_value=mocked_tavily_findings,
+        new=AsyncMock(return_value=mocked_tavily_findings),
     ):
         result = asyncio.run(invoke(payload))
     report = result["report"]
 
     assert report["status"] == "success"
     assert report["log_id"] == "LOG-1003"
+
+
+def test_invoke_stream_mode_emits_live_events() -> None:
+    mocked_agent_output = {
+        "probable_root_cause": "Stream test root cause.",
+        "agent_solution": "Stream test solution.",
+        "next_actions": ["Stream action"],
+        "preventive_actions": ["Stream preventive action"],
+        "confidence": 0.79,
+    }
+    mocked_tavily_findings = [
+        {
+            "source": "Tavily",
+            "title": "Stream Tavily result",
+            "url": "https://example.com/stream",
+            "summary": "Stream summary",
+            "probable_fix": "Stream probable fix",
+        }
+    ]
+
+    async def _collect() -> list[dict]:
+        stream = await invoke({"log_id": "LOG-1002", "stream": True})
+        events: list[dict] = []
+        async for event in stream:
+            events.append(event)
+            if event.get("type") == "report_ready":
+                break
+        return events
+
+    with patch(
+        "rca.workflow.AGENT_PROVIDER.generate",
+        new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.WEB_PROVIDER.search_probable_fixes",
+        new=AsyncMock(return_value=mocked_tavily_findings),
+    ):
+        events = asyncio.run(_collect())
+
+    event_types = [event.get("type") for event in events]
+    assert "step_started" in event_types
+    assert "step_completed" in event_types
+    assert event_types[-1] == "report_ready"

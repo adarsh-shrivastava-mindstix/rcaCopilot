@@ -250,6 +250,139 @@ pre {
   display: none;
 }
 
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.step-item {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 0;
+  border-bottom: 1px dashed #e3eaf4;
+}
+
+.step-item:last-child {
+  border-bottom: 0;
+}
+
+.step-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  margin-top: 1px;
+  border: 2px solid #c4d2e8;
+  background: #fff;
+  position: relative;
+}
+
+.step-title {
+  margin: 0;
+  font-weight: 600;
+  color: #15304f;
+}
+
+.step-meta {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.step-stream {
+  margin: 6px 0 0;
+  color: #445a77;
+  font-size: 0.95rem;
+  font-weight: 400;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.step-item.pending .step-meta {
+  color: #7388a6;
+}
+
+.step-item.loading .step-icon {
+  border-color: var(--accent);
+  border-top-color: #b7d2ff;
+  animation: spin 0.8s linear infinite;
+}
+
+.step-item.loading .step-meta {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.step-item.completed .step-icon {
+  border-color: #b7ebc6;
+  background: #ecfff2;
+}
+
+.step-item.completed .step-icon::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #18794e;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.step-item.completed .step-meta {
+  color: #18794e;
+}
+
+.step-item.failed .step-icon {
+  border-color: #f2b8bd;
+  background: #fff2f3;
+}
+
+.step-item.failed .step-icon::before,
+.step-item.failed .step-icon::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 3px;
+  width: 2px;
+  height: 10px;
+  background: #b42318;
+}
+
+.step-item.failed .step-icon::before {
+  transform: rotate(45deg);
+}
+
+.step-item.failed .step-icon::after {
+  transform: rotate(-45deg);
+}
+
+.step-item.failed .step-meta {
+  color: #b42318;
+}
+
+.step-item.skipped .step-icon {
+  border-style: dashed;
+  border-color: #cdd8e8;
+  background: #f8fafc;
+}
+
+.step-item.skipped .step-meta {
+  color: #8ca0bc;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 860px) {
   .grid {
     grid-template-columns: 1fr;
@@ -263,4 +396,3 @@ pre {
     height: 42px;
   }
 }
-
