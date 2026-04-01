@@ -1,8 +1,8 @@
 from langchain_aws import ChatBedrock
 
-# Uses global inference profile for Claude Sonnet 4.5
-# https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
-MODEL_ID = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+# Uses US inference profile for Claude Opus 4.6
+# Update this string if your account exposes a different exact model id revision.
+MODEL_ID = "us.anthropic.claude-opus-4-6-v1"
 
 def load_model() -> ChatBedrock:
     """

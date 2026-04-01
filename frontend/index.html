@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RCA Chatbot Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Source+Code+Pro:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">RCA Assistant</p>
+        <h1>Root Cause Analysis Console</h1>
+        <p class="subtitle">
+          Enter a log ID to run end-to-end RCA with DB retrieval, source context,
+          Tavily research, and Bedrock reasoning.
+        </p>
+      </section>
+
+      <section class="card">
+        <form id="rca-form" class="form">
+          <label for="logId">Log ID</label>
+          <div class="input-row">
+            <input
+              id="logId"
+              name="logId"
+              type="text"
+              placeholder="LOG-1002"
+              autocomplete="off"
+              required
+            />
+            <button id="submitBtn" type="submit">Analyze</button>
+          </div>
+          <p class="hint">Valid format: <code>LOG-####</code></p>
+        </form>
+
+        <div id="status" class="status hidden"></div>
+      </section>
+
+      <section id="reportSection" class="card hidden">
+        <div class="report-head">
+          <h2>RCA Report</h2>
+          <span id="reportBadge" class="badge">-</span>
+        </div>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Overview</h3>
+            <dl>
+              <div><dt>Report ID</dt><dd id="reportId">-</dd></div>
+              <div><dt>Log ID</dt><dd id="outLogId">-</dd></div>
+              <div><dt>Service</dt><dd id="service">-</dd></div>
+              <div><dt>Confidence</dt><dd id="confidence">-</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel">
+            <h3>Error Location</h3>
+            <dl>
+              <div><dt>Directory</dt><dd id="directory">-</dd></div>
+              <div><dt>File</dt><dd id="filePath">-</dd></div>
+              <div><dt>Function</dt><dd id="functionName">-</dd></div>
+              <div><dt>Line</dt><dd id="lineNo">-</dd></div>
+            </dl>
+          </article>
+        </div>
+
+        <article class="panel">
+          <h3>Issue Summary</h3>
+          <p id="issueSummary">-</p>
+        </article>
+
+        <article class="panel">
+          <h3>Probable Root Cause</h3>
+          <p id="rootCause">-</p>
+        </article>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Web Probable Solution (Tavily)</h3>
+            <p id="webSolution">-</p>
+          </article>
+          <article class="panel">
+            <h3>Agent Intelligence Solution (Bedrock)</h3>
+            <p id="agentSolution">-</p>
+          </article>
+        </div>
+
+        <article class="panel">
+          <h3>Final Combined Solution</h3>
+          <p id="combinedSolution">-</p>
+        </article>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Next Actions</h3>
+            <ul id="nextActions"></ul>
+          </article>
+          <article class="panel">
+            <h3>Preventive Actions</h3>
+            <ul id="preventiveActions"></ul>
+          </article>
+        </div>
+
+        <article class="panel">
+          <h3>Web References</h3>
+          <ul id="webReferences"></ul>
+        </article>
+
+        <article class="panel">
+          <h3>Markdown Report</h3>
+          <pre id="markdownOutput"></pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+

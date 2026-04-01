@@ -1,42 +1,130 @@
-# import pytest
-# from unittest.mock import Mock, patch, AsyncMock, MagicMock
-# import sys
-# from pathlib import Path
+import asyncio
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-# # Add src to path for imports
-# sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-# # Mock MCP client to prevent Gateway connection attempts
-# mock_mcp_client = Mock()
-# mock_mcp_client.get_tools = AsyncMock(return_value=[])
-# mock_mcp_client.__enter__ = Mock(return_value=mock_mcp_client)
-# mock_mcp_client.__exit__ = Mock(return_value=False)
-# with patch('mcp_client.client.get_streamable_http_mcp_client', return_value=mock_mcp_client):
-#     from main import app, invoke
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# class TestAgent:
-#     @patch('main.load_model')
-#     @patch('main.create_agent')
-#     @pytest.mark.asyncio
-#     async def test_invoke_with_prompt(self, mock_create_agent, mock_load_model):
-#         """Test invoke function with user prompt"""
-#         mock_graph = Mock()
-#         mock_result = {"messages": [Mock(content="Test response")]}
-#         mock_graph.ainvoke = AsyncMock(return_value=mock_result)
-#         mock_create_agent.return_value = mock_graph
+from main import invoke
 
-#         payload = {"prompt": "Hello, how are you?"}
-#         result = await invoke(payload)
 
-#         assert result == {"result": "Test response"}
+def test_invoke_with_valid_log_id_returns_success_report() -> None:
+    mocked_agent_output = {
+        "probable_root_cause": "DB timeout due to pool saturation in order repository path.",
+        "agent_solution": "Tune pool and optimize slow query in order_repository.py.",
+        "next_actions": ["Patch and deploy query optimization."],
+        "preventive_actions": ["Add pool saturation alerting."],
+        "confidence": 0.81,
+    }
+    mocked_tavily_findings = [
+        {
+            "source": "Tavily",
+            "title": "SQLAlchemy timeout mitigation",
+            "url": "https://example.com/sqlalchemy-timeout",
+            "summary": "Tune pool and retry strategy.",
+            "probable_fix": "Tune pool sizing and add bounded retries.",
+        }
+    ]
+    with patch(
+        "rca.workflow.AGENT_PROVIDER.generate",
+        new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.WEB_PROVIDER.search_probable_fixes",
+        return_value=mocked_tavily_findings,
+    ):
+        result = asyncio.run(invoke({"log_id": "LOG-1002"}))
+    report = result["report"]
 
-# class TestBedrockAgentCoreApp:
-#     def test_app_initialization(self):
-#         """Test that BedrockAgentCoreApp is properly initialized"""
-#         assert app is not None
-#         assert hasattr(app, 'entrypoint')
+    assert report["status"] == "success"
+    assert report["log_id"] == "LOG-1002"
+    assert report["impacted_service"] == "orders-service"
+    assert report["root_cause_confidence"] > 0.0
+    assert len(report["suspected_files"]) > 0
 
-#     def test_entrypoint_decorator(self):
-#         """Test that entrypoint function is properly decorated"""
 
-#         assert hasattr(invoke, '__name__')
-#         assert invoke.__name__ == 'invoke'
+def test_invoke_with_invalid_log_id_format_returns_failed_report() -> None:
+    result = asyncio.run(invoke({"log_id": "bad-id"}))
+    report = result["report"]
+
+    assert report["status"] == "failed"
+    assert "Invalid log_id" in report["issue_summary"]
+    assert report["root_cause_confidence"] == 0.0
+
+
+def test_invoke_with_unknown_log_id_returns_failed_report() -> None:
+    result = asyncio.run(invoke({"log_id": "LOG-9999"}))
+    report = result["report"]
+
+    assert report["status"] == "failed"
+    assert "not found in DB" in report["issue_summary"]
+    assert report["root_cause_confidence"] == 0.0
+
+
+def test_invoke_with_json_string_payload_parses_log_id() -> None:
+    mocked_agent_output = {
+        "probable_root_cause": "Sample root cause from model output.",
+        "agent_solution": "Sample agent solution from model output.",
+        "next_actions": ["Do action A"],
+        "preventive_actions": ["Do preventive action A"],
+        "confidence": 0.73,
+    }
+    mocked_tavily_findings = [
+        {
+            "source": "Tavily",
+            "title": "Sample Tavily result",
+            "url": "https://example.com",
+            "summary": "Sample summary",
+            "probable_fix": "Sample probable fix",
+        }
+    ]
+    with patch(
+        "rca.workflow.AGENT_PROVIDER.generate",
+        new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.WEB_PROVIDER.search_probable_fixes",
+        return_value=mocked_tavily_findings,
+    ):
+        result = asyncio.run(invoke('{"log_id":"LOG-1001"}'))
+    report = result["report"]
+
+    assert report["status"] == "success"
+    assert report["log_id"] == "LOG-1001"
+
+
+def test_invoke_with_nested_message_payload_parses_log_id() -> None:
+    mocked_agent_output = {
+        "probable_root_cause": "Sample nested root cause.",
+        "agent_solution": "Sample nested agent solution.",
+        "next_actions": ["Nested action"],
+        "preventive_actions": ["Nested preventive action"],
+        "confidence": 0.74,
+    }
+    mocked_tavily_findings = [
+        {
+            "source": "Tavily",
+            "title": "Nested Tavily result",
+            "url": "https://example.com/nested",
+            "summary": "Nested summary",
+            "probable_fix": "Nested probable fix",
+        }
+    ]
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "{\"log_id\":\"LOG-1003\"}",
+            }
+        ]
+    }
+    with patch(
+        "rca.workflow.AGENT_PROVIDER.generate",
+        new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.WEB_PROVIDER.search_probable_fixes",
+        return_value=mocked_tavily_findings,
+    ):
+        result = asyncio.run(invoke(payload))
+    report = result["report"]
+
+    assert report["status"] == "success"
+    assert report["log_id"] == "LOG-1003"

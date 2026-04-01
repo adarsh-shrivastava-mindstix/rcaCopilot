@@ -1,22 +1,22 @@
-default_agent: rcaChatbot_Agent
+default_agent: rcaChatbot
 agents:
-  rcaChatbot_Agent:
-    name: rcaChatbot_Agent
-    entrypoint: C:\Users\Adarsh Shrivastava\rcaChatbot\src\main.py
-    deployment_type: direct_code_deploy
-    runtime_type: PYTHON_3_10
-    platform: linux/amd64
-    container_runtime: null
-    source_path: C:\Users\Adarsh Shrivastava\rcaChatbot\src
+  rcaChatbot:
+    name: rcaChatbot
+    entrypoint: C:/Users/Adarsh Shrivastava/rcaChatbot/src/main.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/arm64
+    container_runtime: none
+    source_path: C:\Users\Adarsh Shrivastava\rcaChatbot
     aws:
-      execution_role: null
+      execution_role: arn:aws:iam::003417131700:role/AgentsRuntimeRole
       execution_role_auto_create: true
-      account: null
-      region: null
+      account: '003417131700'
+      region: us-west-2
       ecr_repository: null
-      ecr_auto_create: false
+      ecr_auto_create: true
       s3_path: null
-      s3_auto_create: true
+      s3_auto_create: false
       network_configuration:
         network_mode: PUBLIC
         network_mode_config: null
@@ -36,10 +36,10 @@ agents:
       execution_role: null
       source_bucket: null
     memory:
-      mode: NO_MEMORY
+      mode: STM_AND_LTM
       memory_id: null
       memory_arn: null
-      memory_name: null
+      memory_name: rcaChatbot_memory
       event_expiry_days: 30
       first_invoke_memory_check_done: false
       was_created_by_toolkit: false
@@ -57,4 +57,4 @@ agents:
     oauth_configuration: null
     api_key_env_var_name: null
     api_key_credential_provider_name: null
-    is_generated_by_agentcore_create: true
+    is_generated_by_agentcore_create: false
