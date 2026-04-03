@@ -25,9 +25,32 @@ def test_invoke_with_valid_log_id_returns_success_report() -> None:
             "probable_fix": "Tune pool sizing and add bounded retries.",
         }
     ]
+    mocked_github_context = {
+        "status": "resolved",
+        "repo": "owner/repo",
+        "branch": "main",
+        "file_path": "services/orders/repository/order_repository.py",
+        "directory": "services/orders/repository",
+        "function_or_class": "fetch_pending_orders",
+        "line_number": 77,
+        "snippet": "def fetch_pending_orders(...): ...",
+        "source_url": "https://github.com/owner/repo/blob/main/services/orders/repository/order_repository.py",
+        "ranked_candidates": [
+            {
+                "file_path": "services/orders/repository/order_repository.py",
+                "confidence": 0.91,
+                "reason": "Matches stack trace and query context.",
+                "function_or_class": "fetch_pending_orders",
+                "line_hint": 77,
+            }
+        ],
+    }
     with patch(
         "rca.workflow.AGENT_PROVIDER.generate",
         new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.GITHUB_PROVIDER.get_context",
+        new=AsyncMock(return_value=mocked_github_context),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
         new=AsyncMock(return_value=mocked_tavily_findings),
@@ -77,9 +100,32 @@ def test_invoke_with_json_string_payload_parses_log_id() -> None:
             "probable_fix": "Sample probable fix",
         }
     ]
+    mocked_github_context = {
+        "status": "resolved",
+        "repo": "owner/repo",
+        "branch": "main",
+        "file_path": "services/payments/handlers/charge_handler.py",
+        "directory": "services/payments/handlers",
+        "function_or_class": "create_charge",
+        "line_number": 142,
+        "snippet": "def create_charge(...): ...",
+        "source_url": "https://github.com/owner/repo/blob/main/services/payments/handlers/charge_handler.py",
+        "ranked_candidates": [
+            {
+                "file_path": "services/payments/handlers/charge_handler.py",
+                "confidence": 0.9,
+                "reason": "Matches stack frame.",
+                "function_or_class": "create_charge",
+                "line_hint": 142,
+            }
+        ],
+    }
     with patch(
         "rca.workflow.AGENT_PROVIDER.generate",
         new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.GITHUB_PROVIDER.get_context",
+        new=AsyncMock(return_value=mocked_github_context),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
         new=AsyncMock(return_value=mocked_tavily_findings),
@@ -108,6 +154,26 @@ def test_invoke_with_nested_message_payload_parses_log_id() -> None:
             "probable_fix": "Nested probable fix",
         }
     ]
+    mocked_github_context = {
+        "status": "resolved",
+        "repo": "owner/repo",
+        "branch": "main",
+        "file_path": "services/gateway/middleware/token_verifier.py",
+        "directory": "services/gateway/middleware",
+        "function_or_class": "verify_jwt",
+        "line_number": 55,
+        "snippet": "def verify_jwt(...): ...",
+        "source_url": "https://github.com/owner/repo/blob/main/services/gateway/middleware/token_verifier.py",
+        "ranked_candidates": [
+            {
+                "file_path": "services/gateway/middleware/token_verifier.py",
+                "confidence": 0.88,
+                "reason": "JWT error path aligns.",
+                "function_or_class": "verify_jwt",
+                "line_hint": 55,
+            }
+        ],
+    }
     payload = {
         "messages": [
             {
@@ -119,6 +185,9 @@ def test_invoke_with_nested_message_payload_parses_log_id() -> None:
     with patch(
         "rca.workflow.AGENT_PROVIDER.generate",
         new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.GITHUB_PROVIDER.get_context",
+        new=AsyncMock(return_value=mocked_github_context),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
         new=AsyncMock(return_value=mocked_tavily_findings),
@@ -147,6 +216,26 @@ def test_invoke_stream_mode_emits_live_events() -> None:
             "probable_fix": "Stream probable fix",
         }
     ]
+    mocked_github_context = {
+        "status": "resolved",
+        "repo": "owner/repo",
+        "branch": "main",
+        "file_path": "services/orders/repository/order_repository.py",
+        "directory": "services/orders/repository",
+        "function_or_class": "fetch_pending_orders",
+        "line_number": 77,
+        "snippet": "def fetch_pending_orders(...): ...",
+        "source_url": "https://github.com/owner/repo/blob/main/services/orders/repository/order_repository.py",
+        "ranked_candidates": [
+            {
+                "file_path": "services/orders/repository/order_repository.py",
+                "confidence": 0.89,
+                "reason": "High stack trace alignment.",
+                "function_or_class": "fetch_pending_orders",
+                "line_hint": 77,
+            }
+        ],
+    }
 
     async def _collect() -> list[dict]:
         stream = await invoke({"log_id": "LOG-1002", "stream": True})
@@ -160,6 +249,9 @@ def test_invoke_stream_mode_emits_live_events() -> None:
     with patch(
         "rca.workflow.AGENT_PROVIDER.generate",
         new=AsyncMock(return_value=mocked_agent_output),
+    ), patch(
+        "rca.workflow.GITHUB_PROVIDER.get_context",
+        new=AsyncMock(return_value=mocked_github_context),
     ), patch(
         "rca.workflow.WEB_PROVIDER.search_probable_fixes",
         new=AsyncMock(return_value=mocked_tavily_findings),

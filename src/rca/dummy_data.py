@@ -94,6 +94,27 @@ SEED_LOGS: dict[str, LogRecord] = {
             "requests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url: https://api.sms-provider.example/v1/messages",
         ],
     ),
+    "LOG-2101": LogRecord(
+        log_id="LOG-2101",
+        service="calculator-service",
+        timestamp="2026-04-03T10:15:42Z",
+        endpoint_or_job="job: calculator/mock_calculator.py",
+        correlation_id="corr-calc-2101",
+        log_lines=[
+            "INFO starting calculator mock run",
+            "DEBUG NUMERATOR=42.0 DENOMINATOR=0.0",
+            "ERROR calculator mock run failed due to runtime exception",
+        ],
+        stack_trace=[
+            "Traceback (most recent call last):",
+            '  File "/home/rahul/projects/rca-repo/calculator/mock_calculator.py", line 18, in <module>',
+            "    main()",
+            '  File "/home/rahul/projects/rca-repo/calculator/mock_calculator.py", line 14, in main',
+            "    _ = NUMERATOR / DENOMINATOR",
+            "        ~~~~~~~~~~^~~~~~~~~~~~~",
+            "ZeroDivisionError: float division by zero",
+        ],
+    ),
 }
 
 

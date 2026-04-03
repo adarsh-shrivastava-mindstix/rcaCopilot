@@ -11,7 +11,7 @@ from langgraph.graph import END, StateGraph
 from rca.models import RCAReport
 from rca.providers import (
     AgentIntelligenceProvider,
-    DummyGitHubContextProvider,
+    GatewayGitHubContextProvider,
     SQLiteLogProvider,
     WebSearchProvider,
 )
@@ -29,7 +29,7 @@ CATEGORY_PATTERNS: dict[str, list[str]] = {
 }
 
 LOG_PROVIDER = SQLiteLogProvider()
-GITHUB_PROVIDER = DummyGitHubContextProvider()
+GITHUB_PROVIDER = GatewayGitHubContextProvider()
 WEB_PROVIDER = WebSearchProvider()
 AGENT_PROVIDER = AgentIntelligenceProvider()
 
@@ -177,17 +177,49 @@ def analyze_logs(state: RCAState) -> RCAState:
     return {"analysis": analysis, "source_location": source_location}
 
 
-def fetch_github_context(state: RCAState) -> RCAState:
+async def fetch_github_context(state: RCAState) -> RCAState:
     if _has_errors(state):
         return {}
 
     location = state.get("source_location", {})
-    context = GITHUB_PROVIDER.get_context(
-        stack_file_path=str(location.get("file_path", "")),
-        line_number=location.get("line_number"),
-        function_name=location.get("function_or_class"),
-    )
-    return {"github_context": context}
+    analysis = state.get("analysis", {})
+    try:
+        context = await GITHUB_PROVIDER.get_context(
+            stack_file_path=str(location.get("file_path", "")),
+            line_number=location.get("line_number"),
+            function_name=location.get("function_or_class"),
+            service_name=str(analysis.get("service_name", "")),
+            endpoint_or_job=str(analysis.get("endpoint_or_job", "")),
+            key_error_message=str(analysis.get("key_error_message", "")),
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "errors": [f"GitHub Gateway context retrieval failed: {exc}"],
+        }
+
+    if str(context.get("status", "")).lower() != "resolved":
+        return {
+            "status": "failed",
+            "errors": [
+                f"GitHub Gateway source resolution failed: {context.get('reason', 'unresolved')}"
+            ],
+        }
+
+    updated_location = dict(location)
+    selected_path = str(context.get("file_path", "")).strip()
+    selected_fn = str(context.get("function_or_class", "")).strip()
+    selected_line = context.get("line_number")
+    if selected_path:
+        updated_location["file_path"] = selected_path
+        updated_location["directory"] = "/".join(selected_path.split("/")[:-1])
+        updated_location["file_name"] = selected_path.split("/")[-1]
+    if selected_fn:
+        updated_location["function_or_class"] = selected_fn
+    if isinstance(selected_line, int):
+        updated_location["line_number"] = selected_line
+
+    return {"github_context": context, "source_location": updated_location}
 
 
 async def do_web_search(state: RCAState) -> RCAState:
@@ -255,6 +287,15 @@ def combine_solutions_and_report(state: RCAState) -> RCAState:
 
     if failed:
         error_message = state.get("errors", ["Unknown RCA failure."])[0]
+        lower_error = error_message.lower()
+        if "github gateway" in lower_error:
+            research_summary = "GitHub Gateway context resolution failed before Tavily research."
+        elif "tavily gateway" in lower_error:
+            research_summary = "Tavily Gateway research failed."
+        elif "invalid log_id" in lower_error or "not found in db" in lower_error:
+            research_summary = "Research not started due to input validation or DB lookup failure."
+        else:
+            research_summary = "RCA pipeline failed before final synthesis."
         report = RCAReport(
             report_id=report_id,
             log_id=state.get("log_id", ""),
@@ -266,17 +307,17 @@ def combine_solutions_and_report(state: RCAState) -> RCAState:
             evidence={"errors": state.get("errors", [])},
             suspected_files=[],
             github_context={},
-            research_summary="Web search not executed due to input/DB failure.",
+            research_summary=research_summary,
             web_probable_solution="",
             agent_intelligence_solution="",
-            probable_solution="Unable to produce solution because validation or DB fetch failed.",
+            probable_solution="Unable to produce a final solution because RCA evidence collection failed.",
             next_actions=[
                 "Retry with a valid log_id in format LOG-####.",
-                "Ensure log_id exists in the logs DB table.",
+                "Verify Gateway target/tool availability for GitHub and Tavily.",
             ],
             preventive_actions=[
                 "Add upstream validation before invoking RCA workflow.",
-                "Expose available log_ids endpoint for operators.",
+                "Add health checks for Gateway tool readiness before running RCA.",
             ],
             generated_at=generated_at,
             markdown_report=_failure_markdown(
